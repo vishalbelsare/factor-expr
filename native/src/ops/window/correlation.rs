@@ -2,105 +2,97 @@ use super::super::{parser::Parameter, BoxOp, Named, Operator};
 use crate::ticker_batch::TickerBatch;
 use anyhow::{anyhow, Error, Result};
 use fehler::{throw, throws};
-use std::borrow::Cow;
-use std::cmp::max;
-use std::collections::VecDeque;
-use std::iter::FromIterator;
-use std::mem;
+use std::{borrow::Cow, cmp::max, collections::VecDeque, iter::FromIterator, mem};
 
-#[derive(Clone)]
-struct Cache {
-    history: VecDeque<(f64, f64)>,
-
-    x: f64,
-    y: f64,
-}
-
-impl Cache {
-    fn new() -> Cache {
-        Cache {
-            history: VecDeque::new(),
-
-            x: 0.,
-            y: 0.,
-        }
-    }
-}
-
-pub struct TSCorrelation<T> {
+pub struct Correlation<T> {
     win_size: usize,
     x: BoxOp<T>,
     y: BoxOp<T>,
 
-    cache: Cache,
+    window: VecDeque<(f64, f64)>,
+
+    xsum: f64,
+    ysum: f64,
     i: usize,
 }
 
-impl<T> Clone for TSCorrelation<T> {
+impl<T> Clone for Correlation<T> {
     fn clone(&self) -> Self {
         Self::new(self.win_size, self.x.clone(), self.y.clone())
     }
 }
 
-impl<T> TSCorrelation<T> {
+impl<T> Correlation<T> {
     pub fn new(win_size: usize, x: BoxOp<T>, y: BoxOp<T>) -> Self {
         Self {
             win_size,
             x,
             y,
 
-            cache: Cache::new(),
+            window: VecDeque::new(),
+            xsum: 0.,
+            ysum: 0.,
             i: 0,
         }
     }
 }
 
-impl<T> Named for TSCorrelation<T> {
-    const NAME: &'static str = "TSCorr";
+impl<T> Named for Correlation<T> {
+    const NAME: &'static str = "Corr";
 }
 
-impl<T: TickerBatch> Operator<T> for TSCorrelation<T> {
+impl<T: TickerBatch> Operator<T> for Correlation<T> {
+    fn reset(&mut self) {
+        self.x.reset();
+        self.y.reset();
+        self.window.clear();
+        self.xsum = 0.;
+        self.ysum = 0.;
+        self.i = 0;
+    }
+
     #[throws(Error)]
     fn update<'a>(&mut self, tb: &'a T) -> Cow<'a, [f64]> {
         let (x, y) = (&mut self.x, &mut self.y);
         let (xs, ys) = rayon::join(|| x.update(tb), || y.update(tb));
         let (xs, ys) = (&*xs?, &*ys?);
+        #[cfg(feature = "check")]
         assert_eq!(tb.len(), xs.len());
+        #[cfg(feature = "check")]
         assert_eq!(tb.len(), ys.len());
 
         let mut results = Vec::with_capacity(tb.len());
 
         for (&xval, &yval) in xs.into_iter().zip(ys) {
             if self.i < self.x.ready_offset() || self.i < self.y.ready_offset() {
+                #[cfg(feature = "check")]
+                assert!(xval.is_nan() || yval.is_nan());
                 results.push(f64::NAN);
                 self.i += 1;
                 continue;
             }
 
-            self.cache.history.push_back((xval, yval));
-            self.cache.x += xval;
-            self.cache.y += yval;
+            self.window.push_back((xval, yval));
+            self.xsum += xval;
+            self.ysum += yval;
 
-            let val = if self.cache.history.len() == self.win_size {
-                let n = self.cache.history.len() as f64; // this should be equal to self.win_size
-                let xbar = self.cache.x / n;
-                let ybar = self.cache.y / n;
+            let val = if self.window.len() == self.win_size {
+                let n = self.window.len() as f64; // this should be equal to self.win_size
+                let xbar = self.xsum / n;
+                let ybar = self.ysum / n;
                 let nom = self
-                    .cache
-                    .history
+                    .window
                     .iter()
                     .map(|(x, y)| (x - xbar) * (y - ybar))
                     .sum::<f64>();
                 let denomx = self
-                    .cache
-                    .history
+                    .window
                     .iter()
                     .map(|(x, _)| (x - xbar).powf(2.))
                     .sum::<f64>()
                     .sqrt();
                 let denomy = self
-                    .cache
-                    .history
+                    .window
                     .iter()
                     .map(|(_, y)| (y - ybar).powf(2.))
                     .sum::<f64>()
@@ -113,9 +105,9 @@ impl<T: TickerBatch> Operator<T> for TSCorrelation<T> {
                 } else {
                     self.fchecked(nom / denom)?
                 };
-                let (xval, yval) = self.cache.history.pop_front().unwrap();
-                self.cache.x -= xval;
-                self.cache.y -= yval;
+                let (xval, yval) = self.window.pop_front().unwrap();
+                self.xsum -= xval;
+                self.ysum -= yval;
                 val
             } else {
                 f64::NAN
@@ -206,14 +198,14 @@ impl<T: TickerBatch> Operator<T> for TSCorrelation<T> {
     }
 }
 
-impl<T: TickerBatch> FromIterator<Parameter<T>> for Result<TSCorrelation<T>> {
+impl<T: TickerBatch> FromIterator<Parameter<T>> for Result<Correlation<T>> {
     #[throws(Error)]
-    fn from_iter<A: IntoIterator<Item = Parameter<T>>>(iter: A) -> TSCorrelation<T> {
+    fn from_iter<A: IntoIterator<Item = Parameter<T>>>(iter: A) -> Correlation<T> {
         let mut params: Vec<_> = iter.into_iter().collect();
         if params.len() != 3 {
             throw!(anyhow!(
                 "{} expect a constant and two series, got {:?}",
-                TSCorrelation::<T>::NAME,
+                Correlation::<T>::NAME,
                 params
             ))
         }
@@ -221,10 +213,10 @@ impl<T: TickerBatch> FromIterator<Parameter<T>> for Result<TSCorrelation<T>> {
         let k2 = params.remove(0).to_operator();
         let k3 = params.remove(0).to_operator();
         match (k1, k2, k3) {
-            (Parameter::Constant(c), Some(sx), Some(sy)) => TSCorrelation::new(c as usize, sx, sy),
+            (Parameter::Constant(c), Some(sx), Some(sy)) => Correlation::new(c as usize, sx, sy),
             _ => throw!(anyhow!(
                 "{} expect a constant and two series",
-                TSCorrelation::<T>::NAME,
+                Correlation::<T>::NAME,
             )),
         }
     }

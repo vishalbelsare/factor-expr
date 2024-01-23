@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - master
-      - prerelease
   push:
     branches:
       - master
@@ -23,17 +22,15 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
+          toolchain: nightly
           components: rustfmt
-          default: true
 
       - name: Install python
         uses: actions/setup-python@v2
         with:
-          python-version: 3.8
+          python-version: 3.11
           architecture: x64
 
       - name: Check which Python we use
@@ -50,10 +47,8 @@ jobs:
         run: just bootstrap-python
 
       - name: Is the code formatted?
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all --manifest-path native/Cargo.toml -- --check -q
+        run: |
+          cargo fmt --all --manifest-path native/Cargo.toml -- --check -q
 
       - name: Run tests
         run: just test

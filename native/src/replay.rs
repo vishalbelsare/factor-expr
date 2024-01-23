@@ -5,11 +5,12 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use fehler::throws;
-use parquet::file::reader::SerializedFileReader;
-use parquet::{arrow::arrow_reader::ParquetRecordBatchReader, file::reader::FileReader};
+use parquet::{
+    arrow::arrow_reader::ParquetRecordBatchReader,
+    file::reader::{FileReader, SerializedFileReader},
+};
 use rayon::prelude::*;
-use std::fs::File;
-use std::{borrow::Cow, collections::HashMap};
+use std::{borrow::Cow, collections::HashMap, fs::File};
 
 static DEFAULT_BATCH_SIZE: usize = 2048;
 
@@ -74,7 +75,7 @@ pub fn replay_file<O>(
     path: &str,
     ops: Vec<&mut (dyn Operator<RecordBatch>)>,
     batch_size: O,
-) -> (usize, HashMap<usize, Float64Array>, HashMap<usize, Error>)
+) -> (HashMap<usize, Float64Array>, HashMap<usize, Error>)
 where
     O: Into<Option<usize>>,
 {
@@ -115,5 +116,5 @@ where
         Some(nrows),
     )?;
 
-    (nrows, succeeded, failed)
+    (succeeded, failed)
 }

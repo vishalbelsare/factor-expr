@@ -2,10 +2,7 @@ use super::super::{parser::Parameter, BoxOp, Named, Operator};
 use crate::ticker_batch::TickerBatch;
 use anyhow::{anyhow, Error, Result};
 use fehler::{throw, throws};
-use std::borrow::Cow;
-use std::collections::VecDeque;
-use std::iter::FromIterator;
-use std::mem;
+use std::{borrow::Cow, collections::VecDeque, iter::FromIterator, mem};
 
 pub struct Delay<T> {
     win_size: usize,
@@ -37,15 +34,24 @@ impl<T> Named for Delay<T> {
 }
 
 impl<T: TickerBatch> Operator<T> for Delay<T> {
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.window.clear();
+        self.i = 0;
+    }
+
     #[throws(Error)]
     fn update<'a>(&mut self, tb: &'a T) -> Cow<'a, [f64]> {
         let vals = &*self.inner.update(tb)?;
+        #[cfg(feature = "check")]
         assert_eq!(tb.len(), vals.len());
 
         let mut results = Vec::with_capacity(tb.len());
 
         for &val in vals {
             if self.i < self.inner.ready_offset() {
+                #[cfg(feature = "check")]
+                assert!(val.is_nan());
                 results.push(f64::NAN);
                 self.i += 1;
                 continue;

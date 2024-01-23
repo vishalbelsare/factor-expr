@@ -1,6 +1,4 @@
-use std::collections::VecDeque;
-use std::mem;
-use std::{borrow::Cow, iter::FromIterator};
+use std::{borrow::Cow, collections::VecDeque, iter::FromIterator, mem};
 
 use anyhow::{anyhow, Error, Result};
 use fehler::{throw, throws};
@@ -25,14 +23,14 @@ impl<T> Clone for SMA<T> {
 }
 
 impl<T> SMA<T> {
-    pub fn new(inner: BoxOp<T>, n: usize) -> Self {
+    pub fn new(inner: BoxOp<T>, win_size: usize) -> Self {
         Self {
-            window: VecDeque::with_capacity(n),
+            inner,
+            win_size,
+
+            window: VecDeque::with_capacity(win_size),
             sum: 0.,
             i: 0,
-
-            inner,
-            win_size: n,
         }
     }
 }
@@ -42,15 +40,25 @@ impl<T> Named for SMA<T> {
 }
 
 impl<T: TickerBatch> Operator<T> for SMA<T> {
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.window.clear();
+        self.sum = 0.;
+        self.i = 0;
+    }
+
     #[throws(Error)]
     fn update<'a>(&mut self, tb: &'a T) -> Cow<'a, [f64]> {
         let vals = &*self.inner.update(tb)?;
+        #[cfg(feature = "check")]
         assert_eq!(tb.len(), vals.len());
 
         let mut results = Vec::with_capacity(tb.len());
 
         for &val in vals {
             if self.i < self.inner.ready_offset() {
+                #[cfg(feature = "check")]
+                assert!(val.is_nan());
                 results.push(f64::NAN);
                 self.i += 1;
                 continue;

@@ -1,20 +1,21 @@
 use super::ops::{from_str, Operator};
 use anyhow::Result;
-use arrow::array::{make_array, Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ffi::{self, FFI_ArrowArray, FFI_ArrowSchema};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{make_array, Array},
+    datatypes::{DataType, Field, Schema},
+    ffi::{self, FFI_ArrowArray, FFI_ArrowSchema},
+    record_batch::RecordBatch,
+};
 use dict_derive::IntoPyObject;
 use fehler::throw;
-use pyo3::class::basic::CompareOp;
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use pyo3::{class::basic::CompareOp, exceptions::PyValueError, prelude::*};
+use std::{
+    borrow::Cow,
+    collections::{hash_map::DefaultHasher, HashMap},
+    convert::TryFrom,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 // *mut FFI_ArrowArray, *mut FFI_ArrowSchema
 type ArrowFFIPtr = (usize, usize);
@@ -41,6 +42,10 @@ impl Factor {
 
     pub fn ready_offset(&self) -> usize {
         self.op.ready_offset()
+    }
+
+    pub fn reset(&mut self) {
+        self.op.reset()
     }
 
     pub fn replace<'p>(&self, i: usize, other: PyRef<'p, Factor>) -> PyResult<Factor> {
@@ -171,6 +176,45 @@ pub fn replay<'py>(
         .allow_threads(|| -> Result<_> {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(njobs).build()?;
             Ok(pool.install(|| crate::replay::replay(rbs.iter().map(Cow::Borrowed), ops, None))?)
+        })
+        .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+
+    Ok(ReplayResult {
+        succeeded: succeeded
+            .into_iter()
+            .map(|(k, v)| {
+                let data = v.into_data();
+                let (array, schema) = ffi::to_ffi(&data).unwrap();
+                let array = Box::into_raw(Box::new(array));
+                let schema = Box::into_raw(Box::new(schema));
+
+                (k, (array as usize, schema as usize))
+            })
+            .collect(),
+        failed: failed
+            .into_iter()
+            .map(|(k, v)| (k, format!("{}", v)))
+            .collect(),
+    })
+}
+
+#[pyfunction]
+pub fn replay_file<'py>(
+    py: Python<'py>,
+    file: &str,
+    mut ops: Vec<Py<Factor>>,
+    njobs: usize,
+) -> PyResult<ReplayResult> {
+    let mut ops: Vec<_> = ops.iter_mut().map(|f| f.borrow_mut(py)).collect();
+    let ops = ops
+        .iter_mut()
+        .map(|f| (&mut *f.op) as &mut dyn Operator<RecordBatch>)
+        .collect();
+
+    let (succeeded, failed) = py
+        .allow_threads(|| -> Result<_> {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(njobs).build()?;
+            Ok(pool.install(|| crate::replay::replay_file(file, ops, None))?)
         })
         .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
 
